@@ -136,3 +136,66 @@ class TestBusStore:
             assert result is not None
             assert result["payload"] == {"x": 1}
             store2.close()
+
+    def test_record_processing_success(self):
+        store = BusStore()
+        store.record_processing("agent_a", 15.5, success=True)
+        store.record_processing("agent_a", 24.5, success=True)
+        stats = store.get_agent_stats("agent_a")
+        assert stats is not None
+        assert stats["processed_count"] == 2
+        assert stats["error_count"] == 0
+        assert stats["avg_latency_ms"] == 20.0
+        assert stats["last_active"] is not None
+
+    def test_record_processing_error(self):
+        store = BusStore()
+        store.record_processing("agent_b", 10.0, success=True)
+        store.record_processing("agent_b", 5.0, success=False)
+        stats = store.get_agent_stats("agent_b")
+        assert stats["processed_count"] == 1
+        assert stats["error_count"] == 1
+        # avg_latency only counts successes
+        assert stats["avg_latency_ms"] == 10.0
+
+    def test_get_agent_stats_not_found(self):
+        store = BusStore()
+        assert store.get_agent_stats("nonexistent") is None
+
+    def test_get_all_stats(self):
+        store = BusStore()
+        store.record_processing("a", 10.0, success=True)
+        store.record_processing("b", 20.0, success=True)
+        all_stats = store.get_all_stats()
+        assert len(all_stats) == 2
+        names = {s["agent_name"] for s in all_stats}
+        assert names == {"a", "b"}
+
+    def test_get_history(self):
+        store = BusStore()
+        store.save(Message(topic="a", payload={}, source_agent="x"))
+        store.save(Message(topic="b", payload={}, source_agent="y"))
+        store.save(Message(topic="c", payload={}, source_agent="z"))
+        history = store.get_history(limit=2)
+        assert len(history) == 2
+
+    def test_agent_stats_persisted_via_agent(self):
+        """Verify that BaseAgent records stats in the store."""
+        from bus.agent import BaseAgent
+        from bus.registry import AgentCapability
+
+        class CountAgent(BaseAgent):
+            def handle(self, msg):
+                return None
+
+        bus = MessageBus()
+        agent = CountAgent(AgentCapability(name="counter", consumes=["t"], produces=[]))
+        agent.start(bus)
+        bus.publish(Message(topic="t", payload={}, source_agent="test"))
+        bus.publish(Message(topic="t", payload={}, source_agent="test"))
+        agent.stop()
+
+        stats = bus.store.get_agent_stats("counter")
+        assert stats is not None
+        assert stats["processed_count"] == 2
+        assert stats["avg_latency_ms"] >= 0

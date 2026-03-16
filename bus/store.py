@@ -25,6 +25,14 @@ CREATE TABLE IF NOT EXISTS messages (
     processed_at TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS agent_stats (
+    agent_name TEXT PRIMARY KEY,
+    processed_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    total_latency_ms REAL NOT NULL DEFAULT 0.0,
+    last_active TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_topic ON messages(topic);
 CREATE INDEX IF NOT EXISTS idx_messages_parent_id ON messages(parent_id);
 CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
@@ -97,6 +105,68 @@ class BusStore:
                 ).fetchall()
             queue.extend(row["id"] for row in children)
         return result
+
+    def record_processing(
+        self, agent_name: str, latency_ms: float, success: bool
+    ) -> None:
+        """Record that an agent processed a message (updates agent_stats)."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO agent_stats (agent_name, processed_count, error_count, total_latency_ms, last_active) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(agent_name) DO UPDATE SET "
+                "processed_count = processed_count + ?,"
+                "error_count = error_count + ?,"
+                "total_latency_ms = total_latency_ms + ?,"
+                "last_active = ?",
+                (
+                    agent_name,
+                    1 if success else 0,
+                    0 if success else 1,
+                    latency_ms if success else 0.0,
+                    now,
+                    1 if success else 0,
+                    0 if success else 1,
+                    latency_ms if success else 0.0,
+                    now,
+                ),
+            )
+            self._conn.commit()
+
+    def get_agent_stats(self, agent_name: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM agent_stats WHERE agent_name = ?", (agent_name,)
+            ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        count = d["processed_count"]
+        d["avg_latency_ms"] = d["total_latency_ms"] / count if count > 0 else 0.0
+        return d
+
+    def get_all_stats(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM agent_stats ORDER BY agent_name"
+            ).fetchall()
+        results = []
+        for row in rows:
+            d = dict(row)
+            count = d["processed_count"]
+            d["avg_latency_ms"] = d["total_latency_ms"] / count if count > 0 else 0.0
+            results.append(d)
+        return results
+
+    def get_history(self, limit: int = 100) -> list[dict]:
+        """Get recent messages across all topics, ordered by time."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM messages ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
 
     def close(self) -> None:
         self._conn.close()
