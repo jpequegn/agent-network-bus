@@ -3,6 +3,14 @@ name = "agent-network-bus"
 version = "0.1.0"
 description = "A minimal multi-agent coordination protocol using pub-sub messaging"
 requires-python = ">=3.11"
+dependencies = [
+    "click",
+    "networkx",
+    "rich",
+]
+
+[project.scripts]
+bus = "bus.cli:main"
 
 [build-system]
 requires = ["hatchling"]
