@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -80,13 +81,16 @@ class BaseAgent:
     def _on_message(self, message: Message) -> None:
         """Handler called by the bus. Processes inline (bus dispatches synchronously)."""
         self.status = "processing"
+        t0 = time.perf_counter()
         try:
             result = self.handle(message)
+            latency_ms = (time.perf_counter() - t0) * 1000
             self.processed_count += 1
             self.last_processed_at = datetime.now(timezone.utc)
 
             if self._bus:
                 self._bus.store.mark_processed(message.id, self.name)
+                self._bus.store.record_processing(self.name, latency_ms, success=True)
 
             if result is not None and self._bus:
                 results = result if isinstance(result, list) else [result]
@@ -98,8 +102,11 @@ class BaseAgent:
 
             self.status = "idle"
         except Exception:
+            latency_ms = (time.perf_counter() - t0) * 1000
             self.error_count += 1
             self.status = "error"
+            if self._bus:
+                self._bus.store.record_processing(self.name, latency_ms, success=False)
             logger.exception("Agent '%s' failed processing message %s", self.name, message.id)
 
     def _run_loop(self) -> None:
